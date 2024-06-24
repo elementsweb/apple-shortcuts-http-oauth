@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Configures an API Gateway that Apple Shortcuts can call using the OAuth client credential flow. 
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: !Sub "${AWS::AccountId}-shortcuts-api-example"
+      UserPoolId: !Ref UserPool
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    DependsOn: UserPoolResourceServer
+    Properties:
+      AccessTokenValidity: 5
+      TokenValidityUnits:
+        AccessToken: minutes
+      AllowedOAuthFlows:
+        - client_credentials
+      AllowedOAuthScopes:
+        - shortcuts-api-example/stepfunction:invoke
+      AllowedOAuthFlowsUserPoolClient: true
+      ExplicitAuthFlows:
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      SupportedIdentityProviders:
+        - COGNITO
+      PreventUserExistenceErrors: ENABLED
+      EnableTokenRevocation: true
+      EnablePropagateAdditionalUserContextData: false
+      GenerateSecret: true
+      UserPoolId: !Ref UserPool
+
+  UserPoolResourceServer:
+    Type: AWS::Cognito::UserPoolResourceServer
+    Properties:
+      UserPoolId: !Ref UserPool
+      Identifier: shortcuts-api-example
+      Name: shortcuts-api-example
+      Scopes:
+        - ScopeName: stepfunction:invoke
+          ScopeDescription: Invoke Step Function
+
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      TracingEnabled: true
+      Auth:
+        DefaultAuthorizer: CognitoUserPool
+        Authorizers:
+          CognitoUserPool:
+            Type: COGNITO_USER_POOLS
+            UserPoolArn: !GetAtt UserPool.Arn
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 10
+      DefinitionBody:
+        openapi: "3.0.1"
+        info:
+          title: !Ref AWS::StackName
+        components:
+          schemas:
+            Input:
+              type: "object"
+              required: ["message"]
+              properties:
+                message:
+                  type: "string"
+        produces:
+          - application/json
+        x-amazon-apigateway-request-validators:
+          body-only:
+            validateRequestBody: true
+            validateRequestParameters: false
+        paths:
+          /sample:
+            post:
+              responses:
+                '200':
+                  description: "200 response"
+                  schema:
+                    $ref: "#/definitions/Empty"
+                default:
+                  description: "Default response"
+              security:
+                - CognitoUserPool: ["shortcuts-api-example/stepfunction:invoke"]
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/Input"
+              x-amazon-apigateway-request-validator: "body-only"
+              x-amazon-apigateway-integration:
+                uri:
+                  Fn::Sub: arn:aws:apigateway:${AWS::Region}:states:action/StartSyncExecution
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseTemplates:
+                      application/json: |
+                        #set($inputRoot = $input.path('$'))
+                        {
+                          "Name": "$inputRoot.name",
+                          "Output": $inputRoot.output
+                        }
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                type: "AWS"
+                credentials: !GetAtt ApiGatewayExecutionRole.Arn
+                requestTemplates:
+                  application/json: !Sub "{\"input\": \"$util.escapeJavaScript($input.json('$'))\", \"stateMachineArn\": \"${ShortcutsStateMachine}\"}"
+
+  ApiGatewayExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "apigateway.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "StepFunctionExecutionPolicy"
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: "Allow"
+                Action: "states:StartSyncExecution"
+                Resource: !Ref ShortcutsStateMachine
+
+  CloudWatchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vendedlogs/states/shortcuts-state-machine"
+      RetentionInDays: 90
+
+  ShortcutsStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: statemachine/shortcuts.asl.json
+      Type: EXPRESS
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt CloudWatchLogGroup.Arn
+        IncludeExecutionData: true
+        Level: "ALL"
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: "Allow"
+              Action:
+                - "logs:CreateLogDelivery"
+                - "logs:GetLogDelivery"
+                - "logs:UpdateLogDelivery"
+                - "logs:DeleteLogDelivery"
+                - "logs:ListLogDeliveries"
+                - "logs:PutResourcePolicy"
+                - "logs:DescribeResourcePolicies"
+                - "logs:DescribeLogGroups"
+              Resource: "*"
+
+Outputs:
+  TokenUri:
+    Description: URI to use in "Get contents of URL" URL field
+    Value: !Sub "https://${UserPoolDomain}.auth.${AWS::Region}.amazoncognito.com/oauth2/token"
+
+  ApiEndpoint:
+    Description: Endpoint for REST API
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/v1/sample"
+
+  ClientId:
+    Description: Client ID for the Cognito User Pool Client
+    Value: !Ref UserPoolClient
+
+  ClientSecretCommand:
+    Description: AWS CLI command for retrieving the client secret for the Cognito User Pool Client
+    Value: !Sub "aws cognito-idp describe-user-pool-client --user-pool-id ${UserPool} --client-id ${UserPoolClient} --query 'UserPoolClient.ClientSecret' --output text"
