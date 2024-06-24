@@ -25,6 +25,8 @@ You will need an AWS account and have the AWS CLI and AWS SAM CLI installed.
 
 ## Get started
 
+> Remember to delete the stack when you're done as it will provision resources that start incurring costs.
+
 1. Build the stack with [`sam build`](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-build.html).
 1. Deploy the stack with [`sam deploy`](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-cli-command-reference-sam-deploy.html).
 1. Test getting an access token.
